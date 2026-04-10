@@ -178,17 +178,73 @@ def add_line(doc: Document, text: str = "", bold: bool = False, size: int = 11, 
     return p
 
 
+def add_two_col_line(doc: Document, left: str, right: str = "", size: int = 11):
+    table = doc.add_table(rows=1, cols=2)
+    table.autofit = True
+    table.columns[0].width = Pt(320)
+    table.columns[1].width = Pt(200)
+
+    row = table.rows[0]
+    c1 = row.cells[0]
+    c2 = row.cells[1]
+
+    p1 = c1.paragraphs[0]
+    r1 = p1.add_run(left)
+    r1.font.name = "Times New Roman"
+    r1.font.size = Pt(size)
+
+    p2 = c2.paragraphs[0]
+    r2 = p2.add_run(right)
+    r2.font.name = "Times New Roman"
+    r2.font.size = Pt(size)
+
+
+def order_field_to_item(field_name: str) -> Optional[str]:
+    for item_name, mapped_field in ITEM_TO_ORDER_FIELD.items():
+        if mapped_field == field_name:
+            return item_name
+    return None
+
+
 def normalize_equipment(payload: IncontinenceRequest) -> List[str]:
-    items = [x for x in payload.equipment_list if x in ALLOWED_ITEMS]
+    candidates: List[str] = []
+
+    # 1) explicit equipment_list
+    candidates.extend([x for x in payload.equipment_list if x in ALLOWED_ITEMS])
+
+    # 2) equipment_details names
+    candidates.extend([d.name for d in payload.equipment_details if d.name in ALLOWED_ITEMS])
+
+    # 3) legacy equipment_1..8
+    for value in [
+        payload.equipment_1,
+        payload.equipment_2,
+        payload.equipment_3,
+        payload.equipment_4,
+        payload.equipment_5,
+        payload.equipment_6,
+        payload.equipment_7,
+        payload.equipment_8,
+    ]:
+        if value in ALLOWED_ITEMS:
+            candidates.append(value)
+
+    # 4) any checkbox already set true by caller
+    order = payload.incontinence_order
+    for field_name in ITEM_TO_ORDER_FIELD.values():
+        if getattr(order, field_name, False):
+            item_name = order_field_to_item(field_name)
+            if item_name:
+                candidates.append(item_name)
 
     # Under Pads always
-    if "Under Pads / Chux" not in items:
-        items.insert(0, "Under Pads / Chux")
+    if "Under Pads / Chux" not in candidates:
+        candidates.insert(0, "Under Pads / Chux")
 
     # unique preserve order
     seen = set()
     normalized = []
-    for item in items:
+    for item in candidates:
         if item not in seen:
             normalized.append(item)
             seen.add(item)
@@ -231,25 +287,86 @@ def build_equipment_details(payload: IncontinenceRequest, items: List[str]) -> L
     return result
 
 
-def add_two_col_line(doc: Document, left: str, right: str = "", size: int = 11):
-    table = doc.add_table(rows=1, cols=2)
-    table.autofit = True
-    table.columns[0].width = Pt(320)
-    table.columns[1].width = Pt(200)
+def diagnosis_strings(payload: IncontinenceRequest) -> List[str]:
+    return [f"{dx.code} {dx.label}".strip() for dx in payload.diagnoses if dx.code or dx.label]
 
-    row = table.rows[0]
-    c1 = row.cells[0]
-    c2 = row.cells[1]
 
-    p1 = c1.paragraphs[0]
-    r1 = p1.add_run(left)
-    r1.font.name = "Times New Roman"
-    r1.font.size = Pt(size)
+def primary_diagnosis_string(payload: IncontinenceRequest) -> str:
+    dxs = diagnosis_strings(payload)
+    if dxs:
+        return dxs[0]
+    return payload.primary_diagnosis
 
-    p2 = c2.paragraphs[0]
-    r2 = p2.add_run(right)
-    r2.font.name = "Times New Roman"
-    r2.font.size = Pt(size)
+
+def secondary_diagnoses_string(payload: IncontinenceRequest) -> str:
+    dxs = diagnosis_strings(payload)
+    if len(dxs) > 1:
+        return "; ".join(dxs[1:])
+    return payload.secondary_diagnoses
+
+
+def diagnosis_codes_string(payload: IncontinenceRequest) -> str:
+    codes = [dx.code.strip() for dx in payload.diagnoses if dx.code and dx.code.strip()]
+    return ", ".join(codes) if codes else payload.primary_diagnosis
+
+
+def has_explicit_incontinence(payload: IncontinenceRequest) -> bool:
+    for dx in payload.diagnoses:
+        code = (dx.code or "").upper().strip()
+        label = (dx.label or "").lower()
+        if code.startswith("R32") or code.startswith("R15"):
+            return True
+        if "incontinence" in label:
+            return True
+        if "bowel/bladder incontinence" in label:
+            return True
+        if "urinary incontinence" in label:
+            return True
+        if "fecal incontinence" in label:
+            return True
+    return False
+
+
+def incontinence_assessment_text(payload: IncontinenceRequest) -> str:
+    if has_explicit_incontinence(payload):
+        return (
+            "Patient demonstrates documented bladder and/or bowel control impairment with resulting limitation "
+            "in toileting, hygiene, and related MRADLs. The patient requires structured incontinence management "
+            "to reduce leakage exposure, maintain cleanliness, protect skin integrity, and reduce caregiver burden. "
+            "Functional weakness and impaired mobility contribute to difficulty reaching the toilet safely and "
+            "completing post-episode hygiene independently."
+        )
+    return (
+        "Patient demonstrates functional bladder and/or bowel control impairment clinically supported by existing "
+        "diagnoses, with resulting limitation in toileting, hygiene, and related MRADLs. The patient requires "
+        "structured incontinence management to reduce leakage exposure, maintain cleanliness, protect skin integrity, "
+        "and reduce caregiver burden. Functional weakness and impaired mobility contribute to difficulty reaching the "
+        "toilet safely and completing post-episode hygiene independently."
+    )
+
+
+def clinical_summary_text(payload: IncontinenceRequest) -> str:
+    if has_explicit_incontinence(payload):
+        return (
+            "Based on the documented diagnoses and current functional limitations, the above incontinence supplies are "
+            "medically necessary for safe management of urinary and/or bowel incontinence, hygiene dependency, MRADL "
+            "limitation, skin protection, and caregiver-assisted care. The selected items are limited to clinically "
+            "justified supplies and are consistent with the patient's documented condition and functional needs."
+        )
+    return (
+        "Based on the documented diagnoses and current functional limitations, the above incontinence supplies are "
+        "medically necessary for safe management of functional incontinence, hygiene dependency, MRADL limitation, "
+        "skin protection, and caregiver-assisted care. The selected items are limited to clinically justified supplies "
+        "and are consistent with the patient's documented condition and functional needs."
+    )
+
+
+def order_address_value(payload: IncontinenceRequest) -> str:
+    return (
+        (payload.practice_address or "").strip()
+        or (payload.patient_address or "").strip()
+        or (payload.facility_address or "").strip()
+    )
 
 
 # -----------------------------
@@ -313,12 +430,7 @@ def generate_vn_docx(payload: IncontinenceRequest, items: List[str], details: Li
     add_line(doc, "")
 
     add_line(doc, "INCONTINENCE ASSESSMENT", bold=True, size=12)
-    add_line(
-        doc,
-        "Patient demonstrates bladder and/or bowel control impairment that is documented or clinically supported by existing diagnoses, with resulting limitation in toileting, hygiene, and related MRADLs. "
-        "The patient requires structured incontinence management to reduce leakage exposure, maintain cleanliness, protect skin integrity, and reduce caregiver burden. "
-        "Functional weakness and impaired mobility contribute to difficulty reaching the toilet safely and completing post-episode hygiene independently."
-    )
+    add_line(doc, incontinence_assessment_text(payload))
     add_line(doc, "")
 
     add_line(doc, "REQUIRED MEDICAL EQUIPMENT & MEDICAL NECESSITY", bold=True, size=12)
@@ -329,11 +441,7 @@ def generate_vn_docx(payload: IncontinenceRequest, items: List[str], details: Li
         add_line(doc, "")
 
     add_line(doc, "CLINICAL SUMMARY", bold=True, size=12)
-    add_line(
-        doc,
-        "Based on the documented diagnoses and current functional limitations, the above incontinence supplies are medically necessary for safe management of urinary and/or bowel incontinence, hygiene dependency, MRADL limitation, skin protection, and caregiver-assisted care. "
-        "The selected items are limited to clinically justified supplies and are consistent with the patient's documented condition and functional needs."
-    )
+    add_line(doc, clinical_summary_text(payload))
     add_line(doc, "")
 
     add_line(doc, f"Physician Signature: ________________________________    Date: {payload.signature_date}")
@@ -361,8 +469,8 @@ def generate_order_docx(payload: IncontinenceRequest, order: IncontinenceOrder, 
     add_line(doc, f"Medical / LA Care ID: {payload.insurance_id}")
     add_line(doc, f"Male {checkbox(order.sex_male)}    Female {checkbox(order.sex_female)}")
     add_two_col_line(doc, f"Height: {payload.vitals.height}", f"Weight: {payload.vitals.weight}")
-    add_line(doc, f"DIAGNOSIS: {payload.primary_diagnosis}")
-    add_line(doc, f"Secondary: {payload.secondary_diagnoses}")
+    add_line(doc, f"DIAGNOSIS: {primary_diagnosis_string(payload)}")
+    add_line(doc, f"Secondary: {secondary_diagnoses_string(payload)}")
     add_line(doc, "")
 
     add_line(doc, "Qty / Description / Sizes / Allowable", bold=True, size=11)
@@ -394,7 +502,7 @@ def generate_order_docx(payload: IncontinenceRequest, order: IncontinenceOrder, 
 
     add_line(doc, f"Length of Need: 6 Months {checkbox(order.length_6_months)}    12 Months {checkbox(order.length_12_months)}")
     add_line(doc, f"Physician: {payload.physician_name}")
-    add_line(doc, f"Address: {payload.practice_address}")
+    add_line(doc, f"Address: {order_address_value(payload)}")
     add_line(doc, f"City: {payload.city}   State: {payload.state}   Zip: {payload.zip}")
     add_line(doc, f"Telephone: {payload.practice_phone}   Fax: {payload.practice_fax}   NPI #: {payload.npi}")
     add_line(doc, f"Signature: ________________________________    Date: {payload.signature_date}")
