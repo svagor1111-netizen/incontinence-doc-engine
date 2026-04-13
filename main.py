@@ -160,11 +160,10 @@ def checkbox(value: bool) -> str:
 
 def set_default_font(doc: Document, size: int = 11):
     styles = doc.styles
-    for style_name in ["Normal"]:
-        if style_name in styles:
-            style = styles[style_name]
-            style.font.name = "Times New Roman"
-            style.font.size = Pt(size)
+    if "Normal" in styles:
+        style = styles["Normal"]
+        style.font.name = "Times New Roman"
+        style.font.size = Pt(size)
 
 
 def add_line(doc: Document, text: str = "", bold: bool = False, size: int = 11, align=None):
@@ -181,9 +180,6 @@ def add_line(doc: Document, text: str = "", bold: bool = False, size: int = 11, 
 def add_two_col_line(doc: Document, left: str, right: str = "", size: int = 11):
     table = doc.add_table(rows=1, cols=2)
     table.autofit = True
-    table.columns[0].width = Pt(320)
-    table.columns[1].width = Pt(200)
-
     row = table.rows[0]
     c1 = row.cells[0]
     c2 = row.cells[1]
@@ -292,43 +288,62 @@ def diagnosis_strings(payload: IncontinenceRequest) -> List[str]:
 
 
 def primary_diagnosis_string(payload: IncontinenceRequest) -> str:
+    # Preserve prompt/model-provided expanded diagnosis when present.
+    if (payload.primary_diagnosis or "").strip():
+        return payload.primary_diagnosis.strip()
     dxs = diagnosis_strings(payload)
-    if dxs:
-        return dxs[0]
-    return payload.primary_diagnosis
+    return dxs[0] if dxs else ""
 
 
 def secondary_diagnoses_string(payload: IncontinenceRequest) -> str:
+    # Preserve prompt/model-provided expanded secondary diagnoses when present.
+    if (payload.secondary_diagnoses or "").strip():
+        return payload.secondary_diagnoses.strip()
     dxs = diagnosis_strings(payload)
-    if len(dxs) > 1:
-        return "; ".join(dxs[1:])
-    return payload.secondary_diagnoses
+    return "; ".join(dxs[1:]) if len(dxs) > 1 else ""
 
 
-def diagnosis_codes_string(payload: IncontinenceRequest) -> str:
-    codes = [dx.code.strip() for dx in payload.diagnoses if dx.code and dx.code.strip()]
-    return ", ".join(codes) if codes else payload.primary_diagnosis
+def text_has_incontinence(text: str) -> bool:
+    value = (text or "").lower()
+    phrases = [
+        "urinary incontinence",
+        "fecal incontinence",
+        "bowel/bladder incontinence",
+        "bladder incontinence",
+        "bowel incontinence",
+        "incontinence",
+    ]
+    return any(p in value for p in phrases)
 
 
-def has_explicit_incontinence(payload: IncontinenceRequest) -> bool:
+def has_documented_incontinence(payload: IncontinenceRequest) -> bool:
+    # 1) diagnosis array
     for dx in payload.diagnoses:
-        code = (dx.code or "").upper().strip()
-        label = (dx.label or "").lower()
-        if code.startswith("R32") or code.startswith("R15"):
+        if text_has_incontinence(dx.label) or text_has_incontinence(dx.code):
             return True
-        if "incontinence" in label:
+
+    # 2) model/prompt supplied diagnosis strings
+    if text_has_incontinence(payload.primary_diagnosis):
+        return True
+    if text_has_incontinence(payload.secondary_diagnoses):
+        return True
+
+    # 3) source-derived narrative fields from the prompt/model
+    if text_has_incontinence(payload.functional_status):
+        return True
+    if text_has_incontinence(payload.general_health_status):
+        return True
+
+    # 4) equipment detail narratives may explicitly state documented urinary/bowel incontinence
+    for detail in payload.equipment_details:
+        if text_has_incontinence(detail.dx) or text_has_incontinence(detail.medical_necessity):
             return True
-        if "bowel/bladder incontinence" in label:
-            return True
-        if "urinary incontinence" in label:
-            return True
-        if "fecal incontinence" in label:
-            return True
+
     return False
 
 
 def incontinence_assessment_text(payload: IncontinenceRequest) -> str:
-    if has_explicit_incontinence(payload):
+    if has_documented_incontinence(payload):
         return (
             "Patient demonstrates documented bladder and/or bowel control impairment with resulting limitation "
             "in toileting, hygiene, and related MRADLs. The patient requires structured incontinence management "
@@ -346,7 +361,7 @@ def incontinence_assessment_text(payload: IncontinenceRequest) -> str:
 
 
 def clinical_summary_text(payload: IncontinenceRequest) -> str:
-    if has_explicit_incontinence(payload):
+    if has_documented_incontinence(payload):
         return (
             "Based on the documented diagnoses and current functional limitations, the above incontinence supplies are "
             "medically necessary for safe management of urinary and/or bowel incontinence, hygiene dependency, MRADL "
@@ -408,9 +423,12 @@ def generate_vn_docx(payload: IncontinenceRequest, items: List[str], details: Li
     add_two_col_line(doc, f"Respiration: {payload.vitals.respiration}", f"Temperature: {payload.vitals.temperature}")
     add_line(doc, "")
 
-    add_line(doc, "DIAGNOSES", bold=True, size=12)
-    for dx in payload.diagnoses:
-        add_line(doc, f"{dx.code} - {dx.label}")
+    add_line(doc, "PRIMARY DIAGNOSIS (ICD-10)", bold=True, size=12)
+    add_line(doc, primary_diagnosis_string(payload))
+    add_line(doc, "")
+
+    add_line(doc, "SECONDARY DIAGNOSES (ICD-10)", bold=True, size=12)
+    add_line(doc, secondary_diagnoses_string(payload))
     add_line(doc, "")
 
     add_line(doc, "FUNCTIONAL STATUS", bold=True, size=12)
