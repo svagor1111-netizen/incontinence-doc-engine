@@ -163,6 +163,19 @@ def checkbox(value: bool) -> str:
     return "☑" if value else "☐"
 
 
+def format_us_date(date_str: str) -> str:
+    value = (date_str or "").strip()
+    if not value:
+        return ""
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y"):
+        try:
+            dt = datetime.strptime(value, fmt)
+            return dt.strftime("%m/%d/%Y")
+        except ValueError:
+            continue
+    return value
+
+
 def strip_file_citations(text: str) -> str:
     if not text:
         return ""
@@ -174,14 +187,6 @@ def strip_file_citations(text: str) -> str:
 
 def clean_text(text: str) -> str:
     return strip_file_citations(text or "")
-
-
-def clean_multiline_text(text: str) -> str:
-    if not text:
-        return ""
-    lines = [strip_file_citations(line).strip() for line in text.splitlines()]
-    lines = [line for line in lines if line]
-    return "\n".join(lines)
 
 
 def order_field_to_item(field_name: str) -> Optional[str]:
@@ -242,7 +247,6 @@ def synced_order(payload: IncontinenceRequest, items: List[str]) -> Incontinence
 
     order.length_6_months = False
     order.length_12_months = True
-
     return order
 
 
@@ -270,51 +274,45 @@ def build_equipment_details(payload: IncontinenceRequest, items: List[str]) -> L
     return result
 
 
-def diagnosis_strings(payload: IncontinenceRequest) -> List[str]:
-    values = []
+def diagnosis_pairs(payload: IncontinenceRequest) -> List[tuple[str, str]]:
+    pairs: List[tuple[str, str]] = []
     for dx in payload.diagnoses:
         code = clean_text(dx.code)
         label = clean_text(dx.label)
-        value = f"{code} {label}".strip()
-        if value:
-            values.append(value)
-    return values
+        if code or label:
+            pairs.append((code, label))
+    return pairs
 
 
-def primary_diagnosis_string(payload: IncontinenceRequest) -> str:
-    value = clean_text(payload.primary_diagnosis)
-    if value:
-        return value
-    dxs = diagnosis_strings(payload)
-    return dxs[0] if dxs else ""
+def vn_primary_diagnosis_string(payload: IncontinenceRequest) -> str:
+    pairs = diagnosis_pairs(payload)
+    if pairs:
+        code, label = pairs[0]
+        return f"{code} {label}".strip()
+    return clean_text(payload.primary_diagnosis)
 
 
-def secondary_diagnoses_string(payload: IncontinenceRequest) -> str:
-    value = clean_text(payload.secondary_diagnoses)
-    if value:
-        return value
-    dxs = diagnosis_strings(payload)
-    return "; ".join(dxs[1:]) if len(dxs) > 1 else ""
+def vn_secondary_diagnoses_string(payload: IncontinenceRequest) -> str:
+    pairs = diagnosis_pairs(payload)
+    if len(pairs) > 1:
+        return "; ".join(f"{code} {label}".strip() for code, label in pairs[1:])
+    return clean_text(payload.secondary_diagnoses)
 
 
-def diagnosis_codes_only(payload: IncontinenceRequest) -> List[str]:
-    codes = []
-    for dx in payload.diagnoses:
-        code = clean_text(dx.code)
-        if code:
-            codes.append(code)
-    return codes
+def order_primary_diagnosis_string(payload: IncontinenceRequest) -> str:
+    pairs = diagnosis_pairs(payload)
+    if pairs:
+        code, label = pairs[0]
+        return f"{code} {label}".strip()
+    return clean_text(payload.primary_diagnosis)
 
 
-def preferred_secondary_text(payload: IncontinenceRequest) -> str:
-    provided = clean_text(payload.secondary_diagnoses)
-    if provided:
-        return provided
-
-    dxs = diagnosis_strings(payload)
-    if len(dxs) > 1:
-        return "; ".join(dxs[1:])
-    return ""
+def order_secondary_diagnoses_string(payload: IncontinenceRequest) -> str:
+    pairs = diagnosis_pairs(payload)
+    if len(pairs) > 1:
+        codes = [code for code, _ in pairs[1:] if code]
+        return ", ".join(codes)
+    return clean_text(payload.secondary_diagnoses)
 
 
 def text_has_incontinence(text: str) -> bool:
@@ -351,40 +349,6 @@ def has_documented_incontinence(payload: IncontinenceRequest) -> bool:
     return False
 
 
-def incontinence_assessment_text(payload: IncontinenceRequest) -> str:
-    if has_documented_incontinence(payload):
-        return (
-            "Patient demonstrates documented bladder and/or bowel control impairment with resulting limitation "
-            "in toileting, hygiene, and related MRADLs. The patient requires structured incontinence management "
-            "to reduce leakage exposure, maintain cleanliness, protect skin integrity, and reduce caregiver burden. "
-            "Functional weakness and impaired mobility contribute to difficulty reaching the toilet safely and "
-            "completing post-episode hygiene independently."
-        )
-    return (
-        "Patient demonstrates functional bladder and/or bowel control impairment clinically supported by existing "
-        "diagnoses, with resulting limitation in toileting, hygiene, and related MRADLs. The patient requires "
-        "structured incontinence management to reduce leakage exposure, maintain cleanliness, protect skin integrity, "
-        "and reduce caregiver burden. Functional weakness and impaired mobility contribute to difficulty reaching the "
-        "toilet safely and completing post-episode hygiene independently."
-    )
-
-
-def clinical_summary_text(payload: IncontinenceRequest) -> str:
-    if has_documented_incontinence(payload):
-        return (
-            "Based on the documented diagnoses and current functional limitations, the above incontinence supplies are "
-            "medically necessary for safe management of urinary and/or bowel incontinence, hygiene dependency, MRADL "
-            "limitation, skin protection, and caregiver-assisted care. The selected items are limited to clinically "
-            "justified supplies and are consistent with the patient's documented condition and functional needs."
-        )
-    return (
-        "Based on the documented diagnoses and current functional limitations, the above incontinence supplies are "
-        "medically necessary for safe management of functional incontinence, hygiene dependency, MRADL limitation, "
-        "skin protection, and caregiver-assisted care. The selected items are limited to clinically justified supplies "
-        "and are consistent with the patient's documented condition and functional needs."
-    )
-
-
 def vn_practice_address_value(payload: IncontinenceRequest) -> str:
     return clean_text(payload.practice_address)
 
@@ -396,32 +360,38 @@ def order_address_value(payload: IncontinenceRequest) -> str:
     return clean_text(payload.patient_address) or clean_text(payload.facility_address)
 
 
-def source_based_dme_diagnosis(item_name: str, payload: IncontinenceRequest) -> str:
-    primary = primary_diagnosis_string(payload)
-    secondary = preferred_secondary_text(payload)
+def source_dx_codes_for_dme(payload: IncontinenceRequest) -> str:
+    pairs = diagnosis_pairs(payload)
+    if not pairs:
+        return clean_text(payload.primary_diagnosis)
 
-    mapping = {
-        "Under Pads / Chux": "Functional limitation: bowel/bladder incontinence",
-        "Disposable Brief (Diapers)": "Functional limitation: bowel/bladder incontinence with ADL dependency",
-        "Waterproof Mattress Cover": "Functional limitation: bowel/bladder incontinence with moisture exposure risk",
-        "Incontinence Wash": "Functional limitation: bowel/bladder incontinence with hygiene dependency",
-        "Incontinence Cream": "Functional limitation: bowel/bladder incontinence with skin breakdown risk",
-        "Gloves": "Functional limitation: bowel/bladder incontinence with caregiver-assisted hygiene",
-    }
+    codes = []
+    for code, _ in pairs:
+        if code and code not in codes:
+            codes.append(code)
 
-    suffix = ""
-    if primary and secondary:
-        suffix = f" | Source Dx: {primary}; {secondary}"
-    elif primary:
-        suffix = f" | Source Dx: {primary}"
+    # Keep concise: primary + up to two key supporting codes if present.
+    key_support = []
+    for preferred in ["F03.90", "R60.9", "R06.02"]:
+        if preferred in codes and preferred not in key_support:
+            key_support.append(preferred)
 
-    if item_name in mapping:
-        return mapping[item_name] + suffix
+    selected = [codes[0]]
+    for code in key_support:
+        if code not in selected:
+            selected.append(code)
 
-    return primary or secondary
+    return ", ".join(selected)
 
 
-def source_based_dme_medical_necessity(item_name: str, payload: IncontinenceRequest) -> str:
+def dme_diagnosis_line(payload: IncontinenceRequest) -> str:
+    source_codes = source_dx_codes_for_dme(payload)
+    if source_codes:
+        return f"Source Dx: {source_codes}"
+    return "Source Dx: documented diagnoses"
+
+
+def dme_medical_necessity(item_name: str) -> str:
     if item_name == "Under Pads / Chux":
         return (
             "Patient has documented bowel and/or bladder incontinence requiring absorbent underpads "
@@ -456,12 +426,14 @@ def source_based_dme_medical_necessity(item_name: str, payload: IncontinenceRequ
 
 def normalize_details_for_vn(details: List[EquipmentDetail], payload: IncontinenceRequest) -> List[EquipmentDetail]:
     normalized: List[EquipmentDetail] = []
+    dx_line = dme_diagnosis_line(payload)
+
     for detail in details:
         normalized.append(
             EquipmentDetail(
                 name=detail.name,
-                dx=source_based_dme_diagnosis(detail.name, payload),
-                medical_necessity=source_based_dme_medical_necessity(detail.name, payload),
+                dx=dx_line,
+                medical_necessity=dme_medical_necessity(detail.name),
             )
         )
     return normalized
@@ -533,7 +505,7 @@ def fill_vn_template(payload: IncontinenceRequest, details: List[EquipmentDetail
         "{{practice_address}}": vn_practice_address_value(payload),
         "{{practice_phone}}": clean_text(payload.practice_phone),
         "{{practice_fax}}": clean_text(payload.practice_fax),
-        "{{exam_date}}": clean_text(payload.exam_date),
+        "{{exam_date}}": format_us_date(payload.exam_date),
         "{{patient_name}}": clean_text(payload.patient_name),
         "{{dob}}": clean_text(payload.dob),
         "{{age}}": clean_text(payload.age),
@@ -547,8 +519,8 @@ def fill_vn_template(payload: IncontinenceRequest, details: List[EquipmentDetail
         "{{pulse}}": clean_text(payload.vitals.pulse),
         "{{respiration}}": clean_text(payload.vitals.respiration),
         "{{temperature}}": clean_text(payload.vitals.temperature),
-        "{{primary_diagnosis}}": primary_diagnosis_string(payload),
-        "{{secondary_diagnoses}}": preferred_secondary_text(payload),
+        "{{primary_diagnosis}}": vn_primary_diagnosis_string(payload),
+        "{{secondary_diagnoses}}": vn_secondary_diagnoses_string(payload),
         "{{functional_status}}": clean_text(payload.functional_status),
         "{{cognitive_status}}": clean_text(payload.cognitive_status),
         "{{ambulatory_status}}": clean_text(payload.ambulatory_status),
@@ -561,7 +533,7 @@ def fill_vn_template(payload: IncontinenceRequest, details: List[EquipmentDetail
         "{{equipment_6}}": equipment_lines[5],
         "{{equipment_7}}": equipment_lines[6],
         "{{equipment_8}}": equipment_lines[7],
-        "{{signature_date}}": clean_text(payload.signature_date),
+        "{{signature_date}}": format_us_date(payload.signature_date),
     }
 
     replace_text_in_doc(doc, replacements)
@@ -584,8 +556,8 @@ def fill_order_template(payload: IncontinenceRequest, order: IncontinenceOrder, 
         "{{insurance_id}}": clean_text(payload.insurance_id),
         "{{height}}": clean_text(payload.vitals.height),
         "{{weight}}": clean_text(payload.vitals.weight),
-        "{{primary_diagnosis}}": primary_diagnosis_string(payload),
-        "{{secondary_diagnoses}}": preferred_secondary_text(payload),
+        "{{primary_diagnosis}}": order_primary_diagnosis_string(payload),
+        "{{secondary_diagnoses}}": order_secondary_diagnoses_string(payload),
         "{{physician_name}}": clean_text(payload.physician_name),
         "{{practice_address}}": order_address_value(payload),
         "{{city}}": clean_text(payload.city),
@@ -594,7 +566,7 @@ def fill_order_template(payload: IncontinenceRequest, order: IncontinenceOrder, 
         "{{practice_phone}}": clean_text(payload.practice_phone),
         "{{practice_fax}}": clean_text(payload.practice_fax),
         "{{npi}}": clean_text(payload.npi),
-        "{{signature_date}}": clean_text(payload.signature_date),
+        "{{signature_date}}": format_us_date(payload.signature_date),
     }
 
     replace_text_in_doc(doc, replacements)
