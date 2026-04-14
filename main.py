@@ -297,6 +297,26 @@ def secondary_diagnoses_string(payload: IncontinenceRequest) -> str:
     return "; ".join(dxs[1:]) if len(dxs) > 1 else ""
 
 
+def diagnosis_codes_only(payload: IncontinenceRequest) -> List[str]:
+    codes = []
+    for dx in payload.diagnoses:
+        code = clean_text(dx.code)
+        if code:
+            codes.append(code)
+    return codes
+
+
+def preferred_secondary_text(payload: IncontinenceRequest) -> str:
+    provided = clean_text(payload.secondary_diagnoses)
+    if provided:
+        return provided
+
+    dxs = diagnosis_strings(payload)
+    if len(dxs) > 1:
+        return "; ".join(dxs[1:])
+    return ""
+
+
 def text_has_incontinence(text: str) -> bool:
     value = clean_text(text).lower()
     phrases = [
@@ -359,43 +379,49 @@ def clinical_summary_text(payload: IncontinenceRequest) -> str:
         )
     return (
         "Based on the documented diagnoses and current functional limitations, the above incontinence supplies are "
-            "medically necessary for safe management of functional incontinence, hygiene dependency, MRADL limitation, "
-            "skin protection, and caregiver-assisted care. The selected items are limited to clinically justified supplies "
-            "and are consistent with the patient's documented condition and functional needs."
-        )
-
-
-def order_address_value(payload: IncontinenceRequest) -> str:
-    return (
-        clean_text(payload.practice_address)
-        or clean_text(payload.patient_address)
-        or clean_text(payload.facility_address)
+        "medically necessary for safe management of functional incontinence, hygiene dependency, MRADL limitation, "
+        "skin protection, and caregiver-assisted care. The selected items are limited to clinically justified supplies "
+        "and are consistent with the patient's documented condition and functional needs."
     )
 
 
-def choose_dme_diagnosis_text(item_name: str, payload: IncontinenceRequest) -> str:
-    secondary = secondary_diagnoses_string(payload)
+def vn_practice_address_value(payload: IncontinenceRequest) -> str:
+    return clean_text(payload.practice_address)
+
+
+def order_address_value(payload: IncontinenceRequest) -> str:
+    practice_address = clean_text(payload.practice_address)
+    if practice_address:
+        return practice_address
+    return clean_text(payload.patient_address) or clean_text(payload.facility_address)
+
+
+def source_based_dme_diagnosis(item_name: str, payload: IncontinenceRequest) -> str:
     primary = primary_diagnosis_string(payload)
+    secondary = preferred_secondary_text(payload)
 
-    if item_name == "Under Pads / Chux":
-        return "Documented bowel and/or bladder incontinence"
-    if item_name == "Disposable Brief (Diapers)":
-        return "Documented bowel and/or bladder incontinence with dependence in ADLs"
-    if item_name == "Waterproof Mattress Cover":
-        return "Documented incontinence with moisture exposure risk"
-    if item_name == "Incontinence Wash":
-        return "Documented incontinence with hygiene dependency"
-    if item_name == "Incontinence Cream":
-        return "Documented incontinence with skin breakdown risk"
-    if item_name == "Gloves":
-        return "Caregiver-assisted toileting and hygiene"
+    mapping = {
+        "Under Pads / Chux": "Functional limitation: bowel/bladder incontinence",
+        "Disposable Brief (Diapers)": "Functional limitation: bowel/bladder incontinence with ADL dependency",
+        "Waterproof Mattress Cover": "Functional limitation: bowel/bladder incontinence with moisture exposure risk",
+        "Incontinence Wash": "Functional limitation: bowel/bladder incontinence with hygiene dependency",
+        "Incontinence Cream": "Functional limitation: bowel/bladder incontinence with skin breakdown risk",
+        "Gloves": "Functional limitation: bowel/bladder incontinence with caregiver-assisted hygiene",
+    }
 
-    if secondary:
-        return secondary
-    return primary
+    suffix = ""
+    if primary and secondary:
+        suffix = f" | Source Dx: {primary}; {secondary}"
+    elif primary:
+        suffix = f" | Source Dx: {primary}"
+
+    if item_name in mapping:
+        return mapping[item_name] + suffix
+
+    return primary or secondary
 
 
-def choose_dme_medical_necessity(item_name: str, payload: IncontinenceRequest) -> str:
+def source_based_dme_medical_necessity(item_name: str, payload: IncontinenceRequest) -> str:
     if item_name == "Under Pads / Chux":
         return (
             "Patient has documented bowel and/or bladder incontinence requiring absorbent underpads "
@@ -434,8 +460,8 @@ def normalize_details_for_vn(details: List[EquipmentDetail], payload: Incontinen
         normalized.append(
             EquipmentDetail(
                 name=detail.name,
-                dx=choose_dme_diagnosis_text(detail.name, payload),
-                medical_necessity=choose_dme_medical_necessity(detail.name, payload),
+                dx=source_based_dme_diagnosis(detail.name, payload),
+                medical_necessity=source_based_dme_medical_necessity(detail.name, payload),
             )
         )
     return normalized
@@ -504,7 +530,7 @@ def fill_vn_template(payload: IncontinenceRequest, details: List[EquipmentDetail
 
     replacements = {
         "{{physician_name}}": clean_text(payload.physician_name),
-        "{{practice_address}}": clean_text(payload.practice_address),
+        "{{practice_address}}": vn_practice_address_value(payload),
         "{{practice_phone}}": clean_text(payload.practice_phone),
         "{{practice_fax}}": clean_text(payload.practice_fax),
         "{{exam_date}}": clean_text(payload.exam_date),
@@ -522,7 +548,7 @@ def fill_vn_template(payload: IncontinenceRequest, details: List[EquipmentDetail
         "{{respiration}}": clean_text(payload.vitals.respiration),
         "{{temperature}}": clean_text(payload.vitals.temperature),
         "{{primary_diagnosis}}": primary_diagnosis_string(payload),
-        "{{secondary_diagnoses}}": secondary_diagnoses_string(payload),
+        "{{secondary_diagnoses}}": preferred_secondary_text(payload),
         "{{functional_status}}": clean_text(payload.functional_status),
         "{{cognitive_status}}": clean_text(payload.cognitive_status),
         "{{ambulatory_status}}": clean_text(payload.ambulatory_status),
@@ -559,7 +585,7 @@ def fill_order_template(payload: IncontinenceRequest, order: IncontinenceOrder, 
         "{{height}}": clean_text(payload.vitals.height),
         "{{weight}}": clean_text(payload.vitals.weight),
         "{{primary_diagnosis}}": primary_diagnosis_string(payload),
-        "{{secondary_diagnoses}}": secondary_diagnoses_string(payload),
+        "{{secondary_diagnoses}}": preferred_secondary_text(payload),
         "{{physician_name}}": clean_text(payload.physician_name),
         "{{practice_address}}": order_address_value(payload),
         "{{city}}": clean_text(payload.city),
