@@ -8,11 +8,12 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from docx import Document
-from docx.shared import Pt
-from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "generated")
+VN_TEMPLATE_PATH = os.path.join(BASE_DIR, "MASTER_VN.docx")
+ORDER_TEMPLATE_PATH = os.path.join(BASE_DIR, "MASTER_INCONTINENCE.docx")
+
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 app = FastAPI(title="Incontinence Document Generator")
@@ -121,7 +122,7 @@ class IncontinenceRequest(BaseModel):
 
 
 # -----------------------------
-# HELPERS
+# CONSTANTS
 # -----------------------------
 
 ALLOWED_ITEMS = [
@@ -149,6 +150,10 @@ ITEM_TO_ORDER_FIELD = {
 }
 
 
+# -----------------------------
+# HELPERS
+# -----------------------------
+
 def sanitize_filename(value: str) -> str:
     value = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
     return value[:80] or "document"
@@ -156,43 +161,6 @@ def sanitize_filename(value: str) -> str:
 
 def checkbox(value: bool) -> str:
     return "☑" if value else "☐"
-
-
-def set_default_font(doc: Document, size: int = 11):
-    styles = doc.styles
-    if "Normal" in styles:
-        style = styles["Normal"]
-        style.font.name = "Times New Roman"
-        style.font.size = Pt(size)
-
-
-def add_line(doc: Document, text: str = "", bold: bool = False, size: int = 11, align=None):
-    p = doc.add_paragraph()
-    if align is not None:
-        p.alignment = align
-    run = p.add_run(text)
-    run.bold = bold
-    run.font.name = "Times New Roman"
-    run.font.size = Pt(size)
-    return p
-
-
-def add_two_col_line(doc: Document, left: str, right: str = "", size: int = 11):
-    table = doc.add_table(rows=1, cols=2)
-    table.autofit = True
-    row = table.rows[0]
-    c1 = row.cells[0]
-    c2 = row.cells[1]
-
-    p1 = c1.paragraphs[0]
-    r1 = p1.add_run(left)
-    r1.font.name = "Times New Roman"
-    r1.font.size = Pt(size)
-
-    p2 = c2.paragraphs[0]
-    r2 = p2.add_run(right)
-    r2.font.name = "Times New Roman"
-    r2.font.size = Pt(size)
 
 
 def order_field_to_item(field_name: str) -> Optional[str]:
@@ -225,7 +193,7 @@ def normalize_equipment(payload: IncontinenceRequest) -> List[str]:
         if value in ALLOWED_ITEMS:
             candidates.append(value)
 
-    # 4) any checkbox already set true by caller
+    # 4) checked boxes from incoming order
     order = payload.incontinence_order
     for field_name in ITEM_TO_ORDER_FIELD.values():
         if getattr(order, field_name, False):
@@ -237,7 +205,6 @@ def normalize_equipment(payload: IncontinenceRequest) -> List[str]:
     if "Under Pads / Chux" not in candidates:
         candidates.insert(0, "Under Pads / Chux")
 
-    # unique preserve order
     seen = set()
     normalized = []
     for item in candidates:
@@ -283,26 +250,6 @@ def build_equipment_details(payload: IncontinenceRequest, items: List[str]) -> L
     return result
 
 
-def diagnosis_strings(payload: IncontinenceRequest) -> List[str]:
-    return [f"{dx.code} {dx.label}".strip() for dx in payload.diagnoses if dx.code or dx.label]
-
-
-def primary_diagnosis_string(payload: IncontinenceRequest) -> str:
-    # Preserve prompt/model-provided expanded diagnosis when present.
-    if (payload.primary_diagnosis or "").strip():
-        return payload.primary_diagnosis.strip()
-    dxs = diagnosis_strings(payload)
-    return dxs[0] if dxs else ""
-
-
-def secondary_diagnoses_string(payload: IncontinenceRequest) -> str:
-    # Preserve prompt/model-provided expanded secondary diagnoses when present.
-    if (payload.secondary_diagnoses or "").strip():
-        return payload.secondary_diagnoses.strip()
-    dxs = diagnosis_strings(payload)
-    return "; ".join(dxs[1:]) if len(dxs) > 1 else ""
-
-
 def text_has_incontinence(text: str) -> bool:
     value = (text or "").lower()
     phrases = [
@@ -317,24 +264,19 @@ def text_has_incontinence(text: str) -> bool:
 
 
 def has_documented_incontinence(payload: IncontinenceRequest) -> bool:
-    # 1) diagnosis array
     for dx in payload.diagnoses:
         if text_has_incontinence(dx.label) or text_has_incontinence(dx.code):
             return True
 
-    # 2) model/prompt supplied diagnosis strings
     if text_has_incontinence(payload.primary_diagnosis):
         return True
     if text_has_incontinence(payload.secondary_diagnoses):
         return True
-
-    # 3) source-derived narrative fields from the prompt/model
     if text_has_incontinence(payload.functional_status):
         return True
     if text_has_incontinence(payload.general_health_status):
         return True
 
-    # 4) equipment detail narratives may explicitly state documented urinary/bowel incontinence
     for detail in payload.equipment_details:
         if text_has_incontinence(detail.dx) or text_has_incontinence(detail.medical_necessity):
             return True
@@ -384,86 +326,111 @@ def order_address_value(payload: IncontinenceRequest) -> str:
     )
 
 
-# -----------------------------
-# VN GENERATION
-# -----------------------------
+def primary_diagnosis_string(payload: IncontinenceRequest) -> str:
+    return (payload.primary_diagnosis or "").strip()
 
-def generate_vn_docx(payload: IncontinenceRequest, items: List[str], details: List[EquipmentDetail], file_id: str) -> str:
-    doc = Document()
-    set_default_font(doc, 11)
 
-    add_line(doc, "VISITING NOTE", bold=True, size=14, align=WD_ALIGN_PARAGRAPH.CENTER)
-    add_line(doc, f"Date of Examination: {payload.exam_date}", size=11)
-    add_line(doc, "")
+def secondary_diagnoses_string(payload: IncontinenceRequest) -> str:
+    return (payload.secondary_diagnoses or "").strip()
 
-    add_line(doc, "PATIENT INFORMATION", bold=True, size=12)
-    add_two_col_line(doc, f"Patient Name: {payload.patient_name}", f"DOB: {payload.dob}")
-    add_two_col_line(doc, f"Age: {payload.age}", f"Sex: {payload.sex}")
-    add_two_col_line(doc, f"Insurance ID: {payload.insurance_id}", f"Phone: {payload.patient_phone}")
-    add_line(doc, f"Address: {payload.patient_address}")
-    if payload.facility_name or payload.facility_address:
-        add_line(doc, f"Facility: {payload.facility_name}")
-        add_line(doc, f"Facility Address: {payload.facility_address}")
-        if payload.facility_phone:
-            add_line(doc, f"Facility Phone: {payload.facility_phone}")
-    add_line(doc, "")
 
-    add_line(doc, "PHYSICIAN INFORMATION", bold=True, size=12)
-    add_line(doc, f"Physician: {payload.physician_name}")
-    if payload.practice_name:
-        add_line(doc, f"Practice: {payload.practice_name}")
-    add_line(doc, f"Practice Address: {payload.practice_address}")
-    add_two_col_line(doc, f"Phone: {payload.practice_phone}", f"Fax: {payload.practice_fax}")
-    add_line(doc, f"NPI: {payload.npi}")
-    add_line(doc, "")
-
-    add_line(doc, "VITAL SIGNS", bold=True, size=12)
-    add_two_col_line(doc, f"Height: {payload.vitals.height}", f"Weight: {payload.vitals.weight}")
-    add_two_col_line(doc, f"Blood Pressure: {payload.vitals.blood_pressure}", f"Pulse: {payload.vitals.pulse}")
-    add_two_col_line(doc, f"Respiration: {payload.vitals.respiration}", f"Temperature: {payload.vitals.temperature}")
-    add_line(doc, "")
-
-    add_line(doc, "PRIMARY DIAGNOSIS (ICD-10)", bold=True, size=12)
-    add_line(doc, primary_diagnosis_string(payload))
-    add_line(doc, "")
-
-    add_line(doc, "SECONDARY DIAGNOSES (ICD-10)", bold=True, size=12)
-    add_line(doc, secondary_diagnoses_string(payload))
-    add_line(doc, "")
-
-    add_line(doc, "FUNCTIONAL STATUS", bold=True, size=12)
-    add_line(doc, payload.functional_status)
-    add_line(doc, "")
-
-    add_line(doc, "COGNITIVE STATUS", bold=True, size=12)
-    add_line(doc, payload.cognitive_status)
-    add_line(doc, "")
-
-    add_line(doc, "AMBULATORY STATUS", bold=True, size=12)
-    add_line(doc, payload.ambulatory_status)
-    add_line(doc, "")
-
-    add_line(doc, "GENERAL HEALTH STATUS", bold=True, size=12)
-    add_line(doc, payload.general_health_status)
-    add_line(doc, "")
-
-    add_line(doc, "INCONTINENCE ASSESSMENT", bold=True, size=12)
-    add_line(doc, incontinence_assessment_text(payload))
-    add_line(doc, "")
-
-    add_line(doc, "REQUIRED MEDICAL EQUIPMENT & MEDICAL NECESSITY", bold=True, size=12)
+def equipment_block_lines(details: List[EquipmentDetail]) -> List[str]:
+    lines = []
     for i, detail in enumerate(details, start=1):
-        add_line(doc, f"{i}. {detail.name}", bold=True, size=11)
-        add_line(doc, f"Diagnosis: {detail.dx}")
-        add_line(doc, f"Medical Necessity: {detail.medical_necessity}")
-        add_line(doc, "")
+        block = (
+            f"{i}. {detail.name}\n"
+            f"Diagnosis: {detail.dx}\n"
+            f"Medical Necessity: {detail.medical_necessity}"
+        )
+        lines.append(block)
 
-    add_line(doc, "CLINICAL SUMMARY", bold=True, size=12)
-    add_line(doc, clinical_summary_text(payload))
-    add_line(doc, "")
+    while len(lines) < 8:
+        lines.append("")
 
-    add_line(doc, f"Physician Signature: ________________________________    Date: {payload.signature_date}")
-    add_line(doc, f"{payload.physician_name}")
+    return lines[:8]
+
+
+def replace_text_in_paragraph(paragraph, replacements: dict):
+    full_text = paragraph.text
+    new_text = full_text
+    for key, value in replacements.items():
+        new_text = new_text.replace(key, value)
+    if new_text != full_text:
+        paragraph.text = new_text
+
+
+def replace_text_in_doc(doc: Document, replacements: dict):
+    for paragraph in doc.paragraphs:
+        replace_text_in_paragraph(paragraph, replacements)
+
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    replace_text_in_paragraph(paragraph, replacements)
+
+
+def replace_line_containing(doc: Document, needle: str, new_text: str):
+    for paragraph in doc.paragraphs:
+        if needle in paragraph.text:
+            paragraph.text = new_text
+
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    if needle in paragraph.text:
+                        paragraph.text = new_text
+
+
+# -----------------------------
+# TEMPLATE RENDER
+# -----------------------------
+
+def fill_vn_template(payload: IncontinenceRequest, details: List[EquipmentDetail], file_id: str) -> str:
+    if not os.path.exists(VN_TEMPLATE_PATH):
+        raise FileNotFoundError(f"VN template not found: {VN_TEMPLATE_PATH}")
+
+    doc = Document(VN_TEMPLATE_PATH)
+    equipment_lines = equipment_block_lines(details)
+
+    replacements = {
+        "{{physician_name}}": payload.physician_name,
+        "{{practice_address}}": payload.practice_address,
+        "{{practice_phone}}": payload.practice_phone,
+        "{{practice_fax}}": payload.practice_fax,
+        "{{exam_date}}": payload.exam_date,
+        "{{patient_name}}": payload.patient_name,
+        "{{dob}}": payload.dob,
+        "{{age}}": payload.age,
+        "{{sex}}": payload.sex,
+        "{{facility_name}}": payload.facility_name,
+        "{{facility_address}}": payload.facility_address,
+        "{{facility_phone}}": payload.facility_phone,
+        "{{height}}": payload.vitals.height,
+        "{{weight}}": payload.vitals.weight,
+        "{{blood_pressure}}": payload.vitals.blood_pressure,
+        "{{pulse}}": payload.vitals.pulse,
+        "{{respiration}}": payload.vitals.respiration,
+        "{{temperature}}": payload.vitals.temperature,
+        "{{primary_diagnosis}}": primary_diagnosis_string(payload),
+        "{{secondary_diagnoses}}": secondary_diagnoses_string(payload),
+        "{{functional_status}}": payload.functional_status,
+        "{{cognitive_status}}": payload.cognitive_status,
+        "{{ambulatory_status}}": payload.ambulatory_status,
+        "{{general_health_status}}": payload.general_health_status,
+        "{{equipment_1}}": equipment_lines[0],
+        "{{equipment_2}}": equipment_lines[1],
+        "{{equipment_3}}": equipment_lines[2],
+        "{{equipment_4}}": equipment_lines[3],
+        "{{equipment_5}}": equipment_lines[4],
+        "{{equipment_6}}": equipment_lines[5],
+        "{{equipment_7}}": equipment_lines[6],
+        "{{equipment_8}}": equipment_lines[7],
+        "{{signature_date}}": payload.signature_date,
+    }
+
+    replace_text_in_doc(doc, replacements)
 
     filename = f"{sanitize_filename(payload.patient_name)}_{file_id}_VN.docx"
     path = os.path.join(OUTPUT_DIR, filename)
@@ -471,59 +438,98 @@ def generate_vn_docx(payload: IncontinenceRequest, items: List[str], details: Li
     return path
 
 
-# -----------------------------
-# ORDER GENERATION
-# -----------------------------
+def fill_order_template(payload: IncontinenceRequest, order: IncontinenceOrder, file_id: str) -> str:
+    if not os.path.exists(ORDER_TEMPLATE_PATH):
+        raise FileNotFoundError(f"Order template not found: {ORDER_TEMPLATE_PATH}")
 
-def generate_order_docx(payload: IncontinenceRequest, order: IncontinenceOrder, file_id: str) -> str:
-    doc = Document()
-    set_default_font(doc, 11)
+    doc = Document(ORDER_TEMPLATE_PATH)
 
-    add_line(doc, "Incontinence Rx", bold=True, size=14, align=WD_ALIGN_PARAGRAPH.CENTER)
-    add_line(doc, "*** CONFIDENTIAL INCONTINENCE SUPPLIES PRESCRIPTION ***", bold=True, size=11, align=WD_ALIGN_PARAGRAPH.CENTER)
-    add_line(doc, "")
+    replacements = {
+        "{{patient_name}}": payload.patient_name,
+        "{{dob}}": payload.dob,
+        "{{insurance_id}}": payload.insurance_id,
+        "{{height}}": payload.vitals.height,
+        "{{weight}}": payload.vitals.weight,
+        "{{primary_diagnosis}}": primary_diagnosis_string(payload),
+        "{{secondary_diagnoses}}": secondary_diagnoses_string(payload),
+        "{{physician_name}}": payload.physician_name,
+        "{{practice_address}}": order_address_value(payload),
+        "{{city}}": payload.city,
+        "{{state}}": payload.state,
+        "{{zip}}": payload.zip,
+        "{{practice_phone}}": payload.practice_phone,
+        "{{practice_fax}}": payload.practice_fax,
+        "{{npi}}": payload.npi,
+        "{{signature_date}}": payload.signature_date,
+    }
 
-    add_two_col_line(doc, f"Patient Name: {payload.patient_name}", f"D.O.B: {payload.dob}")
-    add_line(doc, f"Medical / LA Care ID: {payload.insurance_id}")
-    add_line(doc, f"Male {checkbox(order.sex_male)}    Female {checkbox(order.sex_female)}")
-    add_two_col_line(doc, f"Height: {payload.vitals.height}", f"Weight: {payload.vitals.weight}")
-    add_line(doc, f"DIAGNOSIS: {primary_diagnosis_string(payload)}")
-    add_line(doc, f"Secondary: {secondary_diagnoses_string(payload)}")
-    add_line(doc, "")
+    replace_text_in_doc(doc, replacements)
 
-    add_line(doc, "Qty / Description / Sizes / Allowable", bold=True, size=11)
-
-    add_line(
+    replace_line_containing(
         doc,
-        f"{checkbox(order.disposable_brief)} Disposable Brief (Diapers)     "
-        f"S {checkbox(order.size_s)}  M {checkbox(order.size_m)}  L {checkbox(order.size_l)}  XL-XXL {checkbox(order.size_xl_xxl)}"
+        "Male ☐",
+        f"Male {checkbox(order.sex_male)}   Female {checkbox(order.sex_female)}",
     )
 
-    add_line(
+    replace_line_containing(
         doc,
-        f"{checkbox(order.disposable_pullup)} Disposable Pull-Up            "
-        f"S {checkbox(order.size_s)}  M {checkbox(order.size_m)}  L {checkbox(order.size_l)}  XL-XXL {checkbox(order.size_xl_xxl)}"
+        "Length of Need:",
+        f"Length of Need: 6 Months {checkbox(order.length_6_months)}   12 Months {checkbox(order.length_12_months)}",
     )
 
-    add_line(doc, f"{checkbox(order.underpads_chux)} Under Pads / Chux (Up to 120/month)")
-    add_line(doc, f"{checkbox(order.absorbent_pads_liners)} Absorbent Pads / Liners (Up to 300/month)")
-    add_line(
+    replace_line_containing(
         doc,
-        f"{checkbox(order.reusable_underpants)} Reusable Underpants          "
-        f"S {checkbox(order.size_s)}  M {checkbox(order.size_m)}  L {checkbox(order.size_l)}  XL-XXL {checkbox(order.size_xl_xxl)}"
+        "Disposable Brief (Diapers)",
+        f"{checkbox(order.disposable_brief)} Disposable Brief (Diapers)      {checkbox(order.size_s)} S   {checkbox(order.size_m)} M   {checkbox(order.size_l)} L   {checkbox(order.size_xl_xxl)} XL-XXL",
     )
-    add_line(doc, f"{checkbox(order.waterproof_mattress_cover)} Waterproof Mattress Cover (2/year)")
-    add_line(doc, f"{checkbox(order.incontinence_wash)} Incontinence Wash")
-    add_line(doc, f"{checkbox(order.incontinence_cream)} Incontinence Cream")
-    add_line(doc, f"{checkbox(order.gloves)} Gloves")
-    add_line(doc, "")
 
-    add_line(doc, f"Length of Need: 6 Months {checkbox(order.length_6_months)}    12 Months {checkbox(order.length_12_months)}")
-    add_line(doc, f"Physician: {payload.physician_name}")
-    add_line(doc, f"Address: {order_address_value(payload)}")
-    add_line(doc, f"City: {payload.city}   State: {payload.state}   Zip: {payload.zip}")
-    add_line(doc, f"Telephone: {payload.practice_phone}   Fax: {payload.practice_fax}   NPI #: {payload.npi}")
-    add_line(doc, f"Signature: ________________________________    Date: {payload.signature_date}")
+    replace_line_containing(
+        doc,
+        "Disposable Pull-Up",
+        f"{checkbox(order.disposable_pullup)} Disposable Pull-Up              {checkbox(order.size_s)} S   {checkbox(order.size_m)} M   {checkbox(order.size_l)} L   {checkbox(order.size_xl_xxl)} XL-XXL",
+    )
+
+    replace_line_containing(
+        doc,
+        "Under Pads / Chux",
+        f"{checkbox(order.underpads_chux)} Under Pads / Chux               (Up to 120/month)",
+    )
+
+    replace_line_containing(
+        doc,
+        "Absorbent Pads / Liners",
+        f"{checkbox(order.absorbent_pads_liners)} Absorbent Pads / Liners         (Up to 300/month)",
+    )
+
+    replace_line_containing(
+        doc,
+        "Reusable Underpants",
+        f"{checkbox(order.reusable_underpants)} Reusable Underpants             {checkbox(order.size_s)} S   {checkbox(order.size_m)} M   {checkbox(order.size_l)} L   {checkbox(order.size_xl_xxl)} XL-XXL",
+    )
+
+    replace_line_containing(
+        doc,
+        "Waterproof Mattress Cover",
+        f"{checkbox(order.waterproof_mattress_cover)} Waterproof Mattress Cover       (2/year)",
+    )
+
+    replace_line_containing(
+        doc,
+        "Incontinence Wash",
+        f"{checkbox(order.incontinence_wash)} Incontinence Wash",
+    )
+
+    replace_line_containing(
+        doc,
+        "Incontinence Cream",
+        f"{checkbox(order.incontinence_cream)} Incontinence Cream",
+    )
+
+    replace_line_containing(
+        doc,
+        "Gloves",
+        f"{checkbox(order.gloves)} Gloves",
+    )
 
     filename = f"{sanitize_filename(payload.patient_name)}_{file_id}_ORDER.docx"
     path = os.path.join(OUTPUT_DIR, filename)
@@ -550,14 +556,20 @@ def create_dme_documents(payload: IncontinenceRequest):
     if payload.mode != "incontinence":
         return {"error": "Only incontinence mode is supported."}
 
+    if not os.path.exists(VN_TEMPLATE_PATH):
+        return {"error": "MASTER_VN.docx not found in backend root."}
+
+    if not os.path.exists(ORDER_TEMPLATE_PATH):
+        return {"error": "MASTER_INCONTINENCE.docx not found in backend root."}
+
     items = normalize_equipment(payload)
     details = build_equipment_details(payload, items)
     order = synced_order(payload, items)
 
     file_id = datetime.utcnow().strftime("%Y%m%d%H%M%S") + "_" + uuid.uuid4().hex[:8]
 
-    vn_path = generate_vn_docx(payload, items, details, file_id)
-    order_path = generate_order_docx(payload, order, file_id)
+    vn_path = fill_vn_template(payload, details, file_id)
+    order_path = fill_order_template(payload, order, file_id)
 
     base_url = os.getenv("PUBLIC_BASE_URL", "https://incontinence-doc-engine.onrender.com")
     vn_url = f"{base_url}/generated/{os.path.basename(vn_path)}"
