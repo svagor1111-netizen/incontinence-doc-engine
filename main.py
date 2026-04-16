@@ -69,6 +69,10 @@ class IncontinenceOrder(BaseModel):
 
 class IncontinenceRequest(BaseModel):
     mode: str = Field(default="incontinence")
+    selection_mode: str = Field(default="max")
+    command: Optional[str] = ""
+    explicit_items: List[str] = Field(default_factory=list)
+
     patient_name: str
     dob: str
     age: str
@@ -149,6 +153,54 @@ ITEM_TO_ORDER_FIELD = {
     "Gloves": "gloves",
 }
 
+ITEM_ALIASES = {
+    "under pads / chux": "Under Pads / Chux",
+    "under pads": "Under Pads / Chux",
+    "underpads": "Under Pads / Chux",
+    "chux": "Under Pads / Chux",
+    "chux underpads": "Under Pads / Chux",
+    "bed pads": "Under Pads / Chux",
+    "under pads / bed pads / chux": "Under Pads / Chux",
+
+    "disposable brief": "Disposable Brief (Diapers)",
+    "disposable brief (diapers)": "Disposable Brief (Diapers)",
+    "brief": "Disposable Brief (Diapers)",
+    "briefs": "Disposable Brief (Diapers)",
+    "diaper": "Disposable Brief (Diapers)",
+    "diapers": "Disposable Brief (Diapers)",
+
+    "disposable pull-up": "Disposable Pull-Up",
+    "pull-up": "Disposable Pull-Up",
+    "pull up": "Disposable Pull-Up",
+    "pullups": "Disposable Pull-Up",
+    "pull ups": "Disposable Pull-Up",
+
+    "absorbent pads / liners": "Absorbent Pads / Liners",
+    "absorbent pads": "Absorbent Pads / Liners",
+    "liners": "Absorbent Pads / Liners",
+    "pads": "Absorbent Pads / Liners",
+    "shields": "Absorbent Pads / Liners",
+
+    "reusable underpants": "Reusable Underpants",
+    "reusable underwear": "Reusable Underpants",
+    "underpants": "Reusable Underpants",
+
+    "waterproof mattress cover": "Waterproof Mattress Cover",
+    "mattress cover": "Waterproof Mattress Cover",
+    "waterproof sheeting": "Waterproof Mattress Cover",
+    "sheeting": "Waterproof Mattress Cover",
+
+    "incontinence wash": "Incontinence Wash",
+    "wash": "Incontinence Wash",
+
+    "incontinence cream": "Incontinence Cream",
+    "cream": "Incontinence Cream",
+    "barrier cream": "Incontinence Cream",
+
+    "gloves": "Gloves",
+    "glove": "Gloves",
+}
+
 
 # -----------------------------
 # HELPERS
@@ -189,6 +241,20 @@ def clean_text(text: str) -> str:
     return strip_file_citations(text or "")
 
 
+def canonicalize_item_name(value: str) -> str:
+    cleaned = clean_text(value).strip()
+    if not cleaned:
+        return ""
+    if cleaned in ALLOWED_ITEMS:
+        return cleaned
+
+    lowered = cleaned.lower()
+    if lowered in ITEM_ALIASES:
+        return ITEM_ALIASES[lowered]
+
+    return ""
+
+
 def order_field_to_item(field_name: str) -> Optional[str]:
     for item_name, mapped_field in ITEM_TO_ORDER_FIELD.items():
         if mapped_field == field_name:
@@ -196,7 +262,72 @@ def order_field_to_item(field_name: str) -> Optional[str]:
     return None
 
 
+def determine_selection_mode(payload: IncontinenceRequest) -> str:
+    candidates = [
+        clean_text(payload.selection_mode).lower(),
+        clean_text(payload.command).lower(),
+        clean_text(payload.mode).lower(),
+    ]
+
+    for value in candidates:
+        if value in {"lvn", "list_only", "list-only", "list"}:
+            return "list_only"
+        if value in {"vnm", "max", "incontinence"}:
+            return "max"
+
+    return "max"
+
+
+def collect_explicit_list_items(payload: IncontinenceRequest) -> List[str]:
+    candidates: List[str] = []
+
+    # Explicit list field
+    candidates.extend(payload.explicit_items)
+
+    # Allow prompt/tool to pass list through normal equipment fields too
+    candidates.extend(payload.equipment_list)
+    candidates.extend([d.name for d in payload.equipment_details])
+
+    for value in [
+        payload.equipment_1,
+        payload.equipment_2,
+        payload.equipment_3,
+        payload.equipment_4,
+        payload.equipment_5,
+        payload.equipment_6,
+        payload.equipment_7,
+        payload.equipment_8,
+    ]:
+        if value:
+            candidates.append(value)
+
+    # Also respect any explicitly checked items from incoming order
+    order = payload.incontinence_order
+    for field_name in ITEM_TO_ORDER_FIELD.values():
+        if getattr(order, field_name, False):
+            item_name = order_field_to_item(field_name)
+            if item_name:
+                candidates.append(item_name)
+
+    normalized: List[str] = []
+    seen = set()
+    for value in candidates:
+        item = canonicalize_item_name(value)
+        if item and item not in seen:
+            normalized.append(item)
+            seen.add(item)
+
+    return normalized
+
+
 def normalize_equipment(payload: IncontinenceRequest) -> List[str]:
+    selection_mode = determine_selection_mode(payload)
+
+    # LIST ONLY MODE: use only explicit items, do not auto-add
+    if selection_mode == "list_only":
+        return collect_explicit_list_items(payload)
+
+    # MAX MODE: preserve current logic
     candidates: List[str] = []
 
     candidates.extend([x for x in payload.equipment_list if x in ALLOWED_ITEMS])
@@ -251,9 +382,13 @@ def synced_order(payload: IncontinenceRequest, items: List[str]) -> Incontinence
 
 
 def build_equipment_details(payload: IncontinenceRequest, items: List[str]) -> List[EquipmentDetail]:
-    by_name = {d.name: d for d in payload.equipment_details if d.name in ALLOWED_ITEMS}
-    result = []
+    by_name = {}
+    for d in payload.equipment_details:
+        canonical = canonicalize_item_name(d.name)
+        if canonical in ALLOWED_ITEMS:
+            by_name[canonical] = d
 
+    result = []
     for item in items:
         if item in by_name:
             result.append(
@@ -370,7 +505,6 @@ def source_dx_codes_for_dme(payload: IncontinenceRequest) -> str:
         if code and code not in codes:
             codes.append(code)
 
-    # Keep concise: primary + up to two key supporting codes if present.
     key_support = []
     for preferred in ["F03.90", "R60.9", "R06.02"]:
         if preferred in codes and preferred not in key_support:
@@ -401,6 +535,19 @@ def dme_medical_necessity(item_name: str) -> str:
         return (
             "Patient is unable to toilet independently due to cognitive impairment, weakness, and mobility limitation, "
             "requiring full absorbent briefs for containment and hygiene management."
+        )
+    if item_name == "Disposable Pull-Up":
+        return (
+            "Patient participates partially in toileting but remains incontinent and requires absorbent pull-up garments "
+            "for day-to-day continence management and hygiene protection."
+        )
+    if item_name == "Absorbent Pads / Liners":
+        return (
+            "Patient has leakage episodes requiring absorbent pads or liners for hygiene maintenance and clothing protection."
+        )
+    if item_name == "Reusable Underpants":
+        return (
+            "Patient requires reusable protective undergarments for continence support and hygiene management."
         )
     if item_name == "Waterproof Mattress Cover":
         return (
@@ -659,7 +806,9 @@ def health():
 
 @app.post("/create_dme_documents")
 def create_dme_documents(payload: IncontinenceRequest):
-    if payload.mode != "incontinence":
+    current_mode = determine_selection_mode(payload)
+
+    if clean_text(payload.mode).lower() not in {"", "incontinence", "vnm", "lvn", "max", "list_only"}:
         return {"error": "Only incontinence mode is supported."}
 
     if not os.path.exists(VN_TEMPLATE_PATH):
@@ -669,6 +818,10 @@ def create_dme_documents(payload: IncontinenceRequest):
         return {"error": "MASTER_INCONTINENCE.docx not found in backend root."}
 
     items = normalize_equipment(payload)
+
+    if current_mode == "list_only" and not items:
+        return {"error": "No item list provided for LIST ONLY mode."}
+
     details = build_equipment_details(payload, items)
     order = synced_order(payload, items)
 
@@ -683,6 +836,7 @@ def create_dme_documents(payload: IncontinenceRequest):
 
     return {
         "status": "success",
+        "selection_mode": current_mode,
         "vn_docx": vn_url,
         "order_docx": order_url,
         "equipment_list": items,
